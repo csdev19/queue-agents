@@ -1,0 +1,94 @@
+# Development Rules
+
+This is a **multi-pattern** monorepo template (DDD + Hexagonal Architecture, TypeScript, Bun,
+Turborepo). It ships four interchangeable web patterns, a backend-only service pattern and a
+local-first desktop pattern, plus optional mobile, docs and desktop add-ons; `bun run customize`
+strips it down to the one you pick.
+
+## Knowledge lives in the hub, not here
+
+Reusable, product-agnostic knowledge is **not** duplicated in this file — it lives in the
+[general-knowledge hub](https://github.com/csdev19/general-knowledge). The README has the full stack
+recipe table; start from the recipe matching your chosen pattern. Key topics (don't re-document them
+here):
+
+- **Feature workflow** — [MVP first, then refactor](https://github.com/csdev19/general-knowledge/blob/main/conventions/mvp-first-then-refactor.md).
+- **Architecture & the dependency rule** — [architecture/](https://github.com/csdev19/general-knowledge/blob/main/architecture/README.md)
+  (`domain <- application <- infra-*`; `infra-*` naming convention; import rules).
+- **Client-Server proxy (Elysia/Hono patterns)** — the web app proxies `/api/auth/*` and `/api/v1/*`
+  to the API Worker via Cloudflare Service Bindings (same-origin cookies on Workers). See
+  [api/](https://github.com/csdev19/general-knowledge/blob/main/api/README.md) and the
+  [elysia](https://github.com/csdev19/general-knowledge/blob/main/stacks/fullstack-elysia-eden.md) /
+  [hono](https://github.com/csdev19/general-knowledge/blob/main/stacks/fullstack-hono-orpc.md) recipes.
+- **Backend-only pattern (no web app)** — every consumer calls the service cross-origin, so there is
+  no proxy and CORS becomes the real access boundary. The allowlist (`CORS_ORIGIN`), Better Auth's
+  `trustedOrigins`, and `sameSite: "none"` cookies must all agree. See
+  [service-only-hono](https://github.com/csdev19/general-knowledge/blob/main/stacks/service-only-hono.md)
+  and [centralized auth service](https://github.com/csdev19/general-knowledge/blob/main/api/centralized-auth-service.md).
+- **Convex (realtime pattern)** — [convex/](https://github.com/csdev19/general-knowledge/blob/main/convex/README.md)
+  (client connection, Better Auth hosted in Convex, pinned SDK versions).
+- **web-ui `dist/` build strategy** — [web/web-ui-package.md](https://github.com/csdev19/general-knowledge/blob/main/web/web-ui-package.md).
+- **Cloudflare Wrangler & env config** — [monorepos/wrangler-env-config.md](https://github.com/csdev19/general-knowledge/blob/main/monorepos/wrangler-env-config.md).
+
+## Package Import Rules
+
+- `domain` never imports from `application` or `infra-*`
+- `application` never imports from `infra-*` (uses domain interfaces)
+- `infra-*` never imports from `application`
+- Mobile apps (`apps/mobile/`, `apps/mobile-convex/`) only import `@queue-agents/domain`
+  (and, for `mobile-convex`, `@queue-agents/convex-auth-api`)
+- The desktop apps are the other adapters of `ITodoRepository`, and both run the same
+  `application` use cases the server does:
+  - `apps/desktop-electron/` — the main process implements the port over on-device SQLite. Its
+    renderer never touches Node; everything crosses the preload bridge.
+  - `apps/desktop-tauri/` — the use cases run in the webview over `TauriTodoRepository`, whose
+    every method is one typed Rust command; the Rust core owns SQLite and the webview never sends
+    SQL. See `docs/adr/0002-desktop-tauri-alongside-electron.md`.
+
+## Project-specific rules
+
+- **Skill Configuration:** Skills in `.claude/skills/` may have a **Configuration** table with paths
+  (e.g. `DOCS_BASE`). If a skill's configured path no longer matches the actual project path, update
+  the skill's Configuration table directly so future sessions don't re-discover it.
+- **Env / Wrangler (sharp gotcha):** ALWAYS use `.env` (and `.dev.vars` for local Worker secrets).
+  NEVER add a `vars` / `[vars]` / `[env.*]` block to `wrangler.jsonc` — Wrangler auto-loads `.env`,
+  so a `vars` block drifts from the single source of truth. Wrangler is pinned in the root catalog;
+  keep `compatibility_date` current and identical across all `wrangler.jsonc`, and run
+  `wrangler types` after editing one. Full rules in the hub link above.
+- **Desktop workspace deps are devDependencies, on purpose:** `externalizeDepsPlugin` externalizes
+  exactly what `dependencies` lists, and electron-builder packages exactly that. The
+  `@queue-agents/*` packages export raw TypeScript with no `dist`, so externalizing them would
+  make Node `require` a `.ts` file at runtime. Keeping them in `devDependencies` bundles them into
+  `out/` and keeps the source out of the shipped asar. Full reasoning in
+  `docs/adr/0001-desktop-app.md`. (Electron only — the Tauri renderer is a plain Vite bundle.)
+- **No lifecycle scripts — `bun install` never downloads or compiles (sharp gotcha):** there is no
+  `postinstall` anywhere, by the hub rule in `desktop/native-dependencies.md`. `electron@44.x` ships
+  no `postinstall` of its own, so the ~200 MB binary is fetched explicitly by
+  `apps/desktop-electron`'s `electron:install` (idempotent), which `dev`, `start`, `package:*` and
+  the release workflow call first. Without it, `electron-vite dev` fails with
+  `Error: Electron uninstall`. Tests, type-check and `build` need no binary. The app has no native
+  modules (`node:sqlite`); adding one means an explicit `rebuild:native` script, never a
+  `postinstall` (`docs/adr/0003-desktop-ci-pipelines.md`).
+- **`bun run verify` is the one definition of green:** lint, format check, package builds,
+  type-check, tests. The Lefthook pre-push runs it (plus the Tauri app's `verify:rust` when a push
+  touches its Rust core or the i18n catalogs), and every desktop release workflow runs the same
+  commands in a Linux `verify` job that the macOS job `needs:`. No workflow runs on pull requests;
+  they are all `workflow_dispatch`, for rehearsing a risky change in a clean environment.
+  Change the checks in `verify`, never in one caller.
+- **Tauri bindings are generated and committed:** `apps/desktop-tauri/src/bindings.ts` comes from
+  the Rust command signatures (tauri-specta). After changing a command, run `bun run bindings` in
+  that app and commit the result; `ci-desktop-tauri.yml` fails on a stale file. The tauri-specta
+  crates are release candidates pinned with `=` — bump all three together.
+- **Desktop renderers need one React (sharp gotcha):** workspace packages (e.g. `i18n` via
+  `use-intl`) can resolve a different React copy than the app. Both desktop apps dedupe
+  `react`/`react-dom` in their Vite and Vitest configs; without it the window renders blank with
+  `dispatcher.useContext` on null.
+- **web-ui needs `dist/`:** `@queue-agents/web-ui` exports point to built files, and `dist/` is
+  NOT committed — a fresh clone has none. Run `bun run build --filter='@queue-agents/*'` before
+  `bun run check-types`, or the apps that import web-ui fail with "Cannot find module". CI already
+  builds packages first. Rebuild after editing web-ui components.
+
+## Common Commands
+
+- `bun run db:push` — Push Drizzle schema to DB (run from monorepo root, NOT from `packages/infra-db/`)
+- `bun run db:studio` — Open Drizzle Studio to inspect DB

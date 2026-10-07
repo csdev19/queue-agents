@@ -1,0 +1,81 @@
+name: Customizer Test
+
+# Tier: on demand only (docs/adr/0003-desktop-ci-pipelines.md; hub:
+# monorepos/release-gated-verification.md). Not triggered by pull requests: with a single
+# owner and no branch protection a PR check is advisory — it bills every push and verifies
+# nothing the Lefthook pre-push (`bun run verify`: lint, format, package builds, types,
+# tests) has not already verified for free. Release workflows run the same `verify` on the
+# tagged SHA before publishing. Dispatch this from the Actions tab after a risky change
+# (lockfile, workflows, scripts/, build config) to rehearse it in a clean environment.
+#
+# Reopen (back to pull_request) when a second person merges to main, or branch protection
+# makes the check required — then it is a guarantee instead of a notification.
+
+# What it checks: every pattern customizes, installs, builds and type-checks. Dispatch it
+# after changing scripts/customize.ts, scripts/rename.ts or the wiring they edit; the
+# structural tests (`bun test scripts/customize.test.ts`) run locally in ~2 s.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  structure:
+    name: Structural (all patterns, no install)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.4
+
+      - name: Structural tests
+        run: bun test scripts/customize.test.ts
+
+  build:
+    name: Core build (${{ matrix.pattern }} ${{ matrix.desktop }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every pattern must build core-only (mobile + docs dropped). The
+        # client-server patterns rely on the customizer stripping the Expo auth
+        # plugin from their server app when mobile is dropped (otherwise
+        # @better-auth/expo@catalog fails to resolve).
+        pattern:
+          - client-server-hono
+          - client-server-elysia
+          - server-only-hono
+          - fullstack-fn-only
+          - fullstack-fn-and-convex
+          - desktop-local-first
+        desktop: [""]
+        include:
+          # The desktop pattern's second runtime. Its Rust side is not compiled
+          # here — the customizer's build is the renderer; ci-desktop-tauri.yml
+          # owns cargo.
+          - pattern: desktop-local-first
+            desktop: --desktop=tauri
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.4
+
+      # Runs the customizer for real (install + build + check-types). It exits
+      # non-zero if any of those fail. `--no-mobile --no-docs` drops the Expo and
+      # Astro installs so this stays about the core stack — mobile/docs pruning is
+      # already covered by the structural job.
+      # The desktop pattern always keeps one desktop app: Electron by default,
+      # Tauri in the extra `include` entry. The other patterns build their core
+      # stack without one.
+      - name: Customize + build core (${{ matrix.pattern }} ${{ matrix.desktop }})
+        run: bun scripts/customize.ts --pattern ${{ matrix.pattern }} ${{ matrix.desktop }} --no-mobile --no-docs --name testcore --yes

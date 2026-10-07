@@ -1,0 +1,17 @@
+{
+  "ignorePatterns": [
+    "**/routeTree.gen.ts",
+    "**/*routeTree.gen.ts",
+    "routeTree.gen.ts",
+    "**/worker-configuration.d.ts",
+    "**/.next/**",
+    "**/.astro/**",
+    "**/out/**",
+    "**/.wrangler/**",
+    "**/src-tauri/target/**",
+    "**/src-tauri/gen/**",
+    "apps/desktop-tauri/src/bindings.ts",
+    "**/.source/**",
+    "**/convex/_generated/**"
+  ]
+}
